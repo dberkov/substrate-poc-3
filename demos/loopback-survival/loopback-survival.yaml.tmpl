@@ -1,0 +1,117 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Phase-0 validation demo for substrate-poc-3 (DESIGN.md §9 R1): proves that
+# a loopback TCP connection between two containers in one actor survives
+# suspend/resume, and characterizes how external connections die.
+#
+# Substitutions performed at deploy time (see hack/install-demo-loopback-survival.sh):
+#   ${BUCKET_NAME}   GCS bucket for actor snapshots
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ate-demo-loopback-survival
+
+---
+
+# The external peer for the client's zombie-socket probe. Deliberately a
+# plain Deployment, NOT an actor: it represents the world outside substrate
+# (an MCP server, an LLM API) whose connections are severed by suspend.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: externalecho
+  namespace: ate-demo-loopback-survival
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: externalecho
+  template:
+    metadata:
+      labels:
+        app: externalecho
+    spec:
+      containers:
+      - name: externalecho
+        image: ko://github.com/dberkov/substrate-poc-3/demos/loopback-survival/externalecho
+        command: ["/ko-app/externalecho"]
+        ports:
+        - containerPort: 7070
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: externalecho
+  namespace: ate-demo-loopback-survival
+spec:
+  selector:
+    app: externalecho
+  ports:
+  - port: 7070
+    targetPort: 7070
+
+---
+
+apiVersion: ate.dev/v1alpha1
+kind: WorkerPool
+metadata:
+  name: loopback-survival
+  namespace: ate-demo-loopback-survival
+  labels:
+    workload: loopback-survival
+spec:
+  # More than one worker so the runbook can force a cross-worker resume
+  # (suspend, occupy the freed worker with a filler actor, resume).
+  replicas: 3
+  # Built by ko from this repo's go.mod dependency on the substrate module
+  # (pinned there; keep the pin in sync with the substrate commit deployed
+  # on the cluster). Identical to substrate's own counter.yaml.tmpl.
+  ateomImage: ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor
+
+---
+
+apiVersion: ate.dev/v1alpha1
+kind: ActorTemplate
+metadata:
+  name: loopback-survival
+  namespace: ate-demo-loopback-survival
+spec:
+  pauseImage: "registry.k8s.io/pause:3.10.2@sha256:f548e0e8e3dc1896ca956272154dde3314e8cc4fde0a57577ee9fa1c63f5baf4"
+  containers:
+  # Container start order follows list order, but the client retries its
+  # initial dial, so readiness does not depend on ordering guarantees.
+  - name: server
+    image: ko://github.com/dberkov/substrate-poc-3/demos/loopback-survival/server
+    command: ["/ko-app/server"]
+  - name: client
+    image: ko://github.com/dberkov/substrate-poc-3/demos/loopback-survival/client
+    command:
+    - "/ko-app/client"
+    - "--external-addr=externalecho.ate-demo-loopback-survival.svc:7070"
+    # readyz returns 200 only once the loopback connection is established,
+    # so the golden snapshot (and every later one) contains an open,
+    # in-flight connection — that is the point of the experiment.
+    readyz:
+      httpGet:
+        path: /readyz
+        port: 80
+  workerSelector:
+    matchLabels:
+      workload: loopback-survival
+  snapshotsConfig:
+    location: gs://${BUCKET_NAME}/ate-demo-loopback-survival/

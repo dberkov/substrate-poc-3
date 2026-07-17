@@ -1,0 +1,216 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# adk-calc: phase-1 demo of suspend/resume-transparent egress (DESIGN.md).
+# A vanilla ADK agent whose MCP tool calls survive actor suspend/resume with
+# zero agent awareness — the egress-sidecar + egress-broker do all the work.
+#
+# Substitutions performed at deploy time (see hack/install-demo-adk-calc.sh):
+#   ${BUCKET_NAME}     GCS bucket for actor snapshots
+#   ${GOOGLE_API_KEY}  Gemini API key (https://aistudio.google.com/apikey)
+#   ${ATE_ATESPACE}    atespace actors are created in (must match the client;
+#                      constant per template, so safe to bake into env)
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ate-demo-adk-calc
+
+---
+
+# ---------- Out-of-actor services (plain Deployments) ----------
+
+# The MCP calculator server. Completely unaware of substrate; the broker
+# holds its connection open across every suspend.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-server
+  namespace: ate-demo-adk-calc
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: mcp-server}
+  template:
+    metadata:
+      labels: {app: mcp-server}
+    spec:
+      containers:
+      - name: mcp-server
+        image: ko://github.com/dberkov/substrate-poc-3/demos/adk-calc/mcp-server
+        command: ["/ko-app/mcp-server"]
+        ports: [{containerPort: 80}]
+        readinessProbe:
+          httpGet: {path: /readyz, port: 80}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-server
+  namespace: ate-demo-adk-calc
+spec:
+  selector: {app: mcp-server}
+  ports: [{port: 80, targetPort: 80}]
+
+---
+
+# The egress-broker: terminates sidecar tunnels, holds upstream open across
+# suspends, resumes actors. Needs ateapi access (in-cluster DNS).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: egress-broker
+  namespace: ate-demo-adk-calc
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: egress-broker}
+  template:
+    metadata:
+      labels: {app: egress-broker}
+    spec:
+      containers:
+      - name: egress-broker
+        image: ko://github.com/dberkov/substrate-poc-3/cmd/egress-broker
+        command: ["/ko-app/egress-broker"]
+        ports:
+        - {containerPort: 9000, name: tunnel}
+        - {containerPort: 9001, name: debug}
+        env:
+        - {name: TUNNEL_LISTEN, value: ":9000"}
+        - {name: DEBUG_LISTEN, value: ":9001"}
+        - {name: ATEAPI_ADDR, value: "api.ate-system.svc:443"}
+        readinessProbe:
+          httpGet: {path: /healthz, port: 9001}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: egress-broker
+  namespace: ate-demo-adk-calc
+spec:
+  selector: {app: egress-broker}
+  ports:
+  - {port: 9000, targetPort: 9000, name: tunnel}
+  - {port: 9001, targetPort: 9001, name: debug}
+
+---
+
+# The ingress-broker: parks the client's /run across the actor's suspend
+# (client side stays suspend-aware in phase 1). Ported from poc-1.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ingress-broker
+  namespace: ate-demo-adk-calc
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: ingress-broker}
+  template:
+    metadata:
+      labels: {app: ingress-broker}
+    spec:
+      containers:
+      - name: ingress-broker
+        image: ko://github.com/dberkov/substrate-poc-3/demos/adk-calc/ingress-broker
+        command: ["/ko-app/ingress-broker"]
+        ports: [{containerPort: 80}]
+        env:
+        - {name: ATENET_ADDR, value: "atenet-router.ate-system.svc:80"}
+        readinessProbe:
+          httpGet: {path: /healthz, port: 80}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ingress-broker
+  namespace: ate-demo-adk-calc
+spec:
+  selector: {app: ingress-broker}
+  ports: [{port: 80, targetPort: 80}]
+
+---
+
+# ---------- The actor ----------
+
+apiVersion: ate.dev/v1alpha1
+kind: WorkerPool
+metadata:
+  name: adk-calc
+  namespace: ate-demo-adk-calc
+  labels:
+    workload: adk-calc
+spec:
+  replicas: 5
+  ateomImage: ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor
+
+---
+
+apiVersion: ate.dev/v1alpha1
+kind: ActorTemplate
+metadata:
+  name: adk-calc
+  namespace: ate-demo-adk-calc
+spec:
+  pauseImage: "registry.k8s.io/pause:3.10.2@sha256:f548e0e8e3dc1896ca956272154dde3314e8cc4fde0a57577ee9fa1c63f5baf4"
+  containers:
+  # The vanilla agent. Its ONLY substrate-relevant config is HTTP_PROXY: the
+  # MCP tool calls (http://) flow through the sidecar; Gemini (https://) has
+  # no HTTPS_PROXY set, so it goes direct in phase 1 (tunneled in phase 2).
+  - name: agent-server
+    image: ko://github.com/dberkov/substrate-poc-3/demos/adk-calc/agent-server
+    command: ["/ko-app/agent-server"]
+    env:
+    - {name: GOOGLE_API_KEY, value: "${GOOGLE_API_KEY}"}
+    - {name: CALC_MCP_URL, value: "http://mcp-server.ate-demo-adk-calc.svc/mcp"}
+    - {name: BROKER_NOTIFY_URL, value: "http://ingress-broker.ate-demo-adk-calc.svc/notify"}
+    # 127.0.0.1, not "localhost": the gVisor actor has no /etc/hosts, so
+    # "localhost" would be sent to cluster DNS and NXDOMAIN. The literal IP
+    # needs no resolution.
+    - {name: HTTP_PROXY, value: "http://127.0.0.1:15001"}
+    - {name: NO_PROXY, value: "localhost,127.0.0.1"}
+    - {name: STATUS_LISTEN, value: "127.0.0.1:9902"}
+    readyz:
+      httpGet:
+        path: /readyz
+        port: 80
+  # The egress-sidecar. Reads its actor name from /run/ate/actor-id; atespace
+  # is constant per template (baked into env). Owns suspend (polls /statusz);
+  # the broker owns resume.
+  - name: egress-sidecar
+    image: ko://github.com/dberkov/substrate-poc-3/cmd/egress-sidecar
+    command: ["/ko-app/egress-sidecar"]
+    env:
+    - {name: PROXY_LISTEN, value: ":15001"}
+    - {name: BROKER_ADDR, value: "egress-broker.ate-demo-adk-calc.svc:9000"}
+    - {name: ATE_ATESPACE, value: "${ATE_ATESPACE}"}
+    - {name: STATUS_URL, value: "http://127.0.0.1:9902/statusz"}
+    # Suspend ~1s into a tool call (blocked on egress the broker holds).
+    - {name: ATEAPI_ADDR, value: "api.ate-system.svc:443"}
+    - {name: BLOCKED_AFTER, value: "1s"}
+    # Idle-suspend is intentionally OFF in phase 1 (IDLE_AFTER defaults to 0):
+    # the sidecar can't see the ingress side, so a "no ADK invocation for N"
+    # timer races the /notify→retry result delivery and can suspend before the
+    # client's reply is served. The actor therefore stays RUNNING between turns
+    # and only suspends while blocked on a tool call. Phase 3 (ingress
+    # visibility) makes idle-suspend precise and safe to enable.
+  workerSelector:
+    matchLabels:
+      workload: adk-calc
+  snapshotsConfig:
+    location: gs://${BUCKET_NAME}/ate-demo-adk-calc/

@@ -1,0 +1,8 @@
+# Local developer environment (sourced by hack/install-poc.sh).
+.poc-dev-env.sh
+
+# Build outputs.
+bin/
+
+# Editor/OS noise.
+.DS_Store

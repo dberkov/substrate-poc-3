@@ -1,0 +1,47 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Copy to .poc-dev-env.sh at the repo root, fill in your values, and it will
+# be sourced automatically by hack/install-poc.sh (mirrors substrate's
+# hack/ate-dev-env.sh.example / .ate-dev-env.sh convention).
+#
+#   cp hack/poc-dev-env.sh.example .poc-dev-env.sh
+
+# GCP project and GKE cluster running Agent Substrate.
+export PROJECT_ID="my-project"
+export CLUSTER_NAME="ate-dev"
+export CLUSTER_LOCATION="us-central1"
+
+# Alternatively, skip gcloud credential setup by naming a kubeconfig context:
+# export KUBECTL_CONTEXT="my-context"
+
+# GCS bucket for actor snapshots (must exist; gVisor workers must be able to
+# write to it). Same bucket you use for the substrate demos works.
+export BUCKET_NAME="my-ate-snapshots-bucket"
+
+# Container registry ko pushes demo images to. This includes ateom-gvisor,
+# which ko builds from this repo's pinned go.mod dependency on the substrate
+# module (see the `tool` directive in go.mod). Keep that pin in sync with
+# the substrate commit deployed on your cluster:
+#   go get github.com/agent-substrate/substrate@<commit>
+export KO_DOCKER_REPO="gcr.io/${PROJECT_ID}"
+
+# Used by the adk-calc demo (phase 1); unused by phase 0.
+# Gemini API key from https://aistudio.google.com/apikey
+export GOOGLE_API_KEY="..."
+
+# Atespace the adk-calc actors are created in. Baked into the sidecar env
+# (constant per template), so the client must use the same atespace (its
+# default is "demo"). Optional; defaults to "demo".
+export ATE_ATESPACE="demo"
