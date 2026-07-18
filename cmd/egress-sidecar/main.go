@@ -109,6 +109,15 @@ func main() {
 	})
 	go client.Run(ctx)
 
+	// Phase-3 ingress interceptor: accept atenet-routed client requests on
+	// :80 and bridge them to the agent + reply-to path. Created before the
+	// suspend poller so the poller can consult its in-flight signal for
+	// idle-suspend.
+	var ingress *sidecar.Ingress
+	if *ingressListen != "" {
+		ingress = sidecar.NewIngress(*agentAddr, log)
+	}
+
 	if !*suspendOff {
 		lc, err := ateapi.Dial(ateapi.Config{Addr: *ateapiAddr, Insecure: *ateapiInsec})
 		if err != nil {
@@ -116,7 +125,7 @@ func main() {
 			os.Exit(1)
 		}
 		defer lc.Close()
-		susp := sidecar.NewSuspender(sidecar.SuspenderConfig{
+		cfg := sidecar.SuspenderConfig{
 			Lifecycle:         lc,
 			Actor:             identity,
 			StatusURL:         *statusURL,
@@ -124,22 +133,22 @@ func main() {
 			IncludeModelCalls: *includeModel,
 			IdleAfter:         *idleAfter,
 			Logger:            log,
-		})
-		go susp.Run(ctx)
+		}
+		if ingress != nil {
+			cfg.IngressIdle = ingress.IdleDuration
+		}
+		go sidecar.NewSuspender(cfg).Run(ctx)
 		log.Info("suspend poller enabled", "blockedAfter", *blockedAfter, "includeModelCalls", *includeModel, "idleAfter", *idleAfter)
 	} else {
 		log.Info("suspend poller disabled")
 	}
 
-	// Phase-3 ingress interceptor: accept atenet-routed client requests on
-	// :80 and bridge them to the agent + reply-to path.
-	if *ingressListen != "" {
+	if ingress != nil {
 		iln, err := net.Listen("tcp", *ingressListen)
 		if err != nil {
 			log.Error("listen ingress", "addr", *ingressListen, "err", err)
 			os.Exit(1)
 		}
-		ingress := sidecar.NewIngress(*agentAddr, log)
 		go func() {
 			if err := ingress.Serve(ctx, iln); err != nil {
 				log.Error("ingress serve", "err", err)

@@ -23,6 +23,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -57,6 +58,13 @@ type Ingress struct {
 	agentClient  *http.Client // loopback; no timeout (survives suspend)
 	replyClient  *http.Client // outbound to ingress-broker; keep-alives off
 	log          *slog.Logger
+
+	// In-flight request tracking, the ground-truth idle signal for the
+	// suspend poller: the sidecar owns the whole ingress request→reply cycle,
+	// so inFlight==0 means the actor has no client work outstanding.
+	mu        sync.Mutex
+	inFlight  int
+	idleSince time.Time // when inFlight last hit 0; zero while a request is in flight
 }
 
 // NewIngress builds an Ingress that forwards to agentAddr (host:port).
@@ -74,7 +82,39 @@ func NewIngress(agentAddr string, log *slog.Logger) *Ingress {
 		// (same rationale as the agent's /notify in earlier phases).
 		replyClient: &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{DisableKeepAlives: true}},
 		log:         log,
+		idleSince:   time.Now(), // starts idle
 	}
+}
+
+// IdleDuration reports how long there has been NO in-flight client request,
+// or 0 while one is being processed. The suspend poller uses this as a
+// precise, race-free idle signal (the sidecar owns request→reply, so it
+// knows exactly when work is outstanding).
+func (i *Ingress) IdleDuration() time.Duration {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.inFlight > 0 || i.idleSince.IsZero() {
+		return 0
+	}
+	return time.Since(i.idleSince)
+}
+
+func (i *Ingress) enterRequest() {
+	i.mu.Lock()
+	i.inFlight++
+	i.idleSince = time.Time{}
+	i.mu.Unlock()
+}
+
+func (i *Ingress) exitRequest() {
+	i.mu.Lock()
+	if i.inFlight > 0 {
+		i.inFlight--
+	}
+	if i.inFlight == 0 {
+		i.idleSince = time.Now()
+	}
+	i.mu.Unlock()
 }
 
 // Serve accepts atenet-routed client connections until ctx is cancelled.
@@ -128,12 +168,14 @@ func (i *Ingress) handle(conn net.Conn) {
 	_, _ = conn.Write([]byte("HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n"))
 	_ = conn.Close()
 
+	i.enterRequest()
 	go i.process(req, body, replyTo, reqID)
 }
 
 // process forwards the request to the agent (loopback, survives suspend) and
 // delivers the response to the ingress-broker's reply endpoint (outbound).
 func (i *Ingress) process(req *http.Request, body []byte, replyTo, reqID string) {
+	defer i.exitRequest()
 	url := i.agentBaseURL + req.URL.RequestURI()
 	areq, err := http.NewRequest(req.Method, url, bytes.NewReader(body))
 	if err != nil {

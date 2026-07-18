@@ -232,12 +232,11 @@ spec:
     # survives suspend). Each call is suspended at most once via the plugin's
     # ModelCallsStarted counter, so it can't loop on resume.
     - {name: INCLUDE_MODEL_CALLS, value: "true"}
-    # Idle-suspend is intentionally OFF in phase 1 (IDLE_AFTER defaults to 0):
-    # the sidecar can't see the ingress side, so a "no ADK invocation for N"
-    # timer races the /notify→retry result delivery and can suspend before the
-    # client's reply is served. The actor therefore stays RUNNING between turns
-    # and only suspends while blocked on a tool call. Phase 3 (ingress
-    # visibility) makes idle-suspend precise and safe to enable.
+    # Phase 3: idle-suspend is now SAFE and enabled. The sidecar owns the whole
+    # ingress request→reply cycle, so it has a precise in-flight-request count
+    # (no /notify race). Suspend a few seconds after the last reply is
+    # delivered, so the actor doesn't sit RUNNING between turns.
+    - {name: IDLE_AFTER, value: "5s"}
   workerSelector:
     matchLabels:
       workload: adk-calc

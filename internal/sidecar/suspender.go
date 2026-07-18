@@ -42,8 +42,14 @@ type Suspender struct {
 	poll         time.Duration
 	blocked      time.Duration // suspend if blocked on a tunneled call this long
 	includeModel bool          // also suspend on model-call blocking (phase 2)
-	idle         time.Duration // suspend if no invocation for this long (0 disables)
+	idle         time.Duration // suspend after this long with no in-flight ingress request (0 disables)
 	cooldown     time.Duration // min time between suspend attempts
+
+	// ingressIdle returns how long there has been no in-flight ingress
+	// request (0 while one is being processed). This is the phase-3 idle
+	// signal — precise and race-free because the sidecar owns the whole
+	// request→reply cycle. nil disables idle-suspend.
+	ingressIdle func() time.Duration
 
 	// lastToolGen/lastModelGen are the ToolCallsStarted/ModelCallsStarted
 	// values at the last tool/model-block suspend. A given call is suspended
@@ -64,9 +70,12 @@ type SuspenderConfig struct {
 	PollInterval      time.Duration
 	BlockedAfter      time.Duration
 	IncludeModelCalls bool          // suspend on model-call blocking too (phase 2)
-	IdleAfter         time.Duration // 0 disables idle-suspend
+	IdleAfter         time.Duration // suspend after this long with no in-flight ingress request (0 disables)
 	Cooldown          time.Duration
-	Logger            *slog.Logger
+	// IngressIdle returns how long there has been no in-flight ingress
+	// request. Required for idle-suspend (phase 3); nil disables it.
+	IngressIdle func() time.Duration
+	Logger      *slog.Logger
 }
 
 func NewSuspender(cfg SuspenderConfig) *Suspender {
@@ -93,6 +102,7 @@ func NewSuspender(cfg SuspenderConfig) *Suspender {
 		includeModel: cfg.IncludeModelCalls,
 		idle:         cfg.IdleAfter,
 		cooldown:     cfg.Cooldown,
+		ingressIdle:  cfg.IngressIdle,
 	}
 }
 
@@ -108,12 +118,19 @@ func (s *Suspender) Run(ctx context.Context) {
 		case <-t.C:
 		}
 
+		// Block-suspend needs /statusz; idle-suspend needs the ingress signal.
+		// A /statusz error only disables the block path, not idle.
 		st, err := s.fetch(ctx)
 		if err != nil {
 			s.log.Debug("activity poll failed", "err", err)
-			continue
 		}
-		reason := s.decide(st)
+		reason := ""
+		if err == nil {
+			reason = s.decideBlocked(st)
+		}
+		if reason == "" && s.ingressIdle != nil && s.idle > 0 && s.ingressIdle() >= s.idle {
+			reason = reasonIdle
+		}
 		if reason == "" {
 			continue
 		}
@@ -158,16 +175,14 @@ const (
 	reasonIdle         = "idle between turns"
 )
 
-// decide applies the suspend policy to a status snapshot.
-func (s *Suspender) decide(st activitystatus.Status) string {
+// decideBlocked applies the mid-request block policy to a /statusz snapshot
+// (idle-suspend is handled separately in Run, from the ingress signal).
+func (s *Suspender) decideBlocked(st activitystatus.Status) string {
 	if st.ToolCallsInFlight > 0 && st.ToolBlockedMillis >= s.blocked.Milliseconds() {
 		return reasonToolBlocked
 	}
 	if s.includeModel && st.ModelCallsInFlight > 0 && st.ModelBlockedMillis >= s.blocked.Milliseconds() {
 		return reasonModelBlocked
-	}
-	if s.idle > 0 && st.InvocationsInFlight == 0 && st.IdleMillis >= s.idle.Milliseconds() {
-		return reasonIdle
 	}
 	return ""
 }
