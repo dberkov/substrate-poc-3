@@ -81,11 +81,15 @@ func Build(ctx context.Context) (agent.Agent, error) {
 	return llmagent.New(llmagent.Config{
 		Name:        "calc_agent",
 		Model:       model,
-		Description: "Evaluates simple two-operand arithmetic expressions.",
-		Instruction: "Parse the arithmetic expression in the user's message. " +
-			"Always call the `calculator` tool with operands a, b and operator op (one of +, -, *, /). " +
-			"After the tool returns, reply with ONLY the numeric result " +
-			"(or the error string if the tool returned one). No prose, no explanation.",
+		Description: "Answers general questions and evaluates arithmetic via a calculator tool.",
+		Instruction: "You are a helpful assistant.\n" +
+			"- If the user's message is a simple two-operand arithmetic expression " +
+			"(e.g. 'calculate 2+5=' or '10 / 2'), call the `calculator` tool with " +
+			"operands a, b and operator op (one of +, -, *, /), then reply with ONLY " +
+			"the numeric result (or the error string the tool returned).\n" +
+			"- For any other question, answer directly and concisely from your own " +
+			"knowledge; do NOT call the calculator tool. If you lack real-time data " +
+			"(e.g. current weather), say so briefly and give your best general answer.",
 		Toolsets: []tool.Toolset{mcpTools},
 	})
 }
