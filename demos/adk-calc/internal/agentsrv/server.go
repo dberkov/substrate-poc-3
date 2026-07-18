@@ -80,7 +80,11 @@ func New(a agent.Agent, notifyURL string) (*Server, error) {
 		// The notify call is infrastructure plumbing to the ingress-broker,
 		// not agent egress — it must NOT traverse the egress tunnel (that
 		// would be circular), so its transport explicitly ignores HTTP_PROXY.
-		notifier: &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{Proxy: nil}},
+		// DisableKeepAlives: /notify is the ingress-broker's only wake path,
+		// and it fires right after a resume. A pooled connection from a
+		// previous turn is dead after the suspend, and Go won't retry a POST
+		// on a broken persistent connection — so dial fresh every time.
+		notifier: &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{Proxy: nil, DisableKeepAlives: true}},
 		registry: newRegistry(),
 	}, nil
 }
@@ -165,25 +169,35 @@ func (s *Server) HandleRun(w http.ResponseWriter, r *http.Request) {
 }
 
 // notifyBroker tells the ingress-broker a result is ready, so it can wake a
-// parked client request. Best-effort.
+// parked client request. This is the ingress-broker's ONLY wake path, so it
+// retries: the call fires right after a resume, when the direct (untunneled)
+// network path may briefly reset a connection. Dropping it would strand the
+// client until its own timeout.
 func (s *Server) notifyBroker(sessionID, input string) {
 	if s.notifyURL == "" {
 		return
 	}
 	body, _ := json.Marshal(runReq{SessionID: sessionID, Input: input})
-	req, err := http.NewRequest(http.MethodPost, s.notifyURL, bytes.NewReader(body))
-	if err != nil {
-		log.Printf("notify: build request: %v", err)
-		return
+	const attempts = 5
+	for i := 1; i <= attempts; i++ {
+		req, err := http.NewRequest(http.MethodPost, s.notifyURL, bytes.NewReader(body))
+		if err != nil {
+			log.Printf("notify: build request: %v", err)
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := s.notifier.Do(req)
+		if err == nil {
+			resp.Body.Close()
+			log.Printf("notify %s: status=%d attempt=%d", s.notifyURL, resp.StatusCode, i)
+			return
+		}
+		log.Printf("notify %s: attempt=%d failed: %v", s.notifyURL, i, err)
+		if i < attempts {
+			time.Sleep(time.Duration(i) * 300 * time.Millisecond)
+		}
 	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := s.notifier.Do(req)
-	if err != nil {
-		log.Printf("notify %s: %v", s.notifyURL, err)
-		return
-	}
-	defer resp.Body.Close()
-	log.Printf("notify %s: status=%d", s.notifyURL, resp.StatusCode)
+	log.Printf("notify %s: giving up after %d attempts", s.notifyURL, attempts)
 }
 
 func writeJSON(w http.ResponseWriter, status int, body runResp) {

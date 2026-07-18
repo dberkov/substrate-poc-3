@@ -21,6 +21,9 @@ import (
 	"sync"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/dberkov/substrate-poc-3/internal/ateapi"
 )
 
@@ -60,11 +63,32 @@ func (r *resumer) resume(actorID string) {
 		}()
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if err := r.lc.ResumeActor(ctx, parseRef(actorID)); err != nil {
-			r.log.Warn("ResumeActor failed", "actor", actorID, "err", err)
-			return
+		ref := parseRef(actorID)
+		// Retry on codes.Aborted ("another operation is in progress"): the
+		// wake can race the suspend that is still finishing (STATUS_SUSPENDING),
+		// especially for fast LLM calls. Back off and retry until the suspend
+		// completes, then the resume succeeds. Mirrors atenet's own resumer.
+		backoff := 200 * time.Millisecond
+		for attempt := 1; ; attempt++ {
+			err := r.lc.ResumeActor(ctx, ref)
+			if err == nil {
+				r.log.Info("ResumeActor ok", "actor", actorID, "attempt", attempt)
+				return
+			}
+			if status.Code(err) != codes.Aborted {
+				r.log.Warn("ResumeActor failed", "actor", actorID, "attempt", attempt, "err", err)
+				return
+			}
+			select {
+			case <-ctx.Done():
+				r.log.Warn("ResumeActor gave up (still aborted at deadline)", "actor", actorID, "err", err)
+				return
+			case <-time.After(backoff):
+			}
+			if backoff < 2*time.Second {
+				backoff = backoff * 3 / 2
+			}
 		}
-		r.log.Info("ResumeActor ok", "actor", actorID)
 	}()
 }
 
