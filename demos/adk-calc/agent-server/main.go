@@ -45,7 +45,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("build agent: %v", err)
 	}
-	srv, err := agentsrv.New(a, os.Getenv("BROKER_NOTIFY_URL"))
+	srv, err := agentsrv.New(a)
 	if err != nil {
 		log.Fatalf("new server: %v", err)
 	}
@@ -73,7 +73,9 @@ func main() {
 	})
 
 	ready.Store(true)
-	listen := envOr("LISTEN_ADDR", ":80")
+	// Phase 3: the egress-sidecar owns the actor's :80 (atenet-routed) and
+	// forwards here over loopback, so the agent listens on a private port.
+	listen := envOr("LISTEN_ADDR", ":8080")
 	log.Printf("agent-server listening on %s", listen)
 	log.Fatal(http.ListenAndServe(listen, mux))
 }

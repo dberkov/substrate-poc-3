@@ -85,11 +85,9 @@ func main() {
 	if err := lc.CreateActor(ctx, actor, *templateNS, *templateName); err != nil {
 		log.Fatalf("create actor: %v", err)
 	}
-	// log.Printf("Resuming actor %s...", actor)
-	// if err := lc.ResumeActor(ctx, actor); err != nil {
-	// 	log.Fatalf("resume actor: %v", err)
-	// }
-	// log.Println("Actor ready.")
+	// No ResumeActor here: the ingress-broker's first request wakes the actor
+	// via atenet. The client never drives suspend/resume — only create and
+	// (suspend-then-)delete for lifecycle.
 
 	defer func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)

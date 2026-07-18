@@ -48,8 +48,8 @@ DESIGN.md                  The design document
 |---|---|---|
 | 0 | [`demos/loopback-survival`](demos/loopback-survival/) — prove loopback TCP survives suspend/resume | **PASS** (2026-07-16: 3 suspend/resume cycles, zero violations) |
 | 1 | [`demos/adk-calc`](demos/adk-calc/) — tunnel + sidecar + broker; vanilla ADK agent, HTTP MCP | **done** (committed on `phase-1`) |
-| 2 | LLM (Gemini/HTTPS) tunneled via CONNECT; suspend during LLM calls too | **implemented, needs cluster run** |
-| 3 | Transparent ingress (client unawareness) | — |
+| 2 | LLM (Gemini/HTTPS) tunneled via CONNECT; suspend during LLM calls too | **done** (on `main`) |
+| 3 | Transparent ingress — client unaware of suspend/resume (reply-to relay) | **implemented, needs cluster run** |
 | 4 | Envoy composition for egress policy/observability (optional) | — |
 
 ## Quickstart (phase 0)

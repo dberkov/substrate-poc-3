@@ -13,24 +13,20 @@
 // limitations under the License.
 
 // Package agentsrv is the HTTP front end of the calculator agent actor. It
-// serves POST /run (called via the ingress-broker) and drives the ADK
-// runner, deduplicating by (sessionID, input) so a client request retried
-// after a suspend/resume gets the same answer. It registers the generic
+// serves POST /run and drives the ADK runner, and registers the generic
 // activityz plugin so the sidecar can observe in-flight work.
 //
-// Note what is NOT here versus poc-1: no actor ID, no ateapi, no self-
-// suspend, no egress broker. The egress transparency lives entirely in the
-// sidecar; this server is a plain ADK host.
+// As of phase 3 this is a plain ADK host: the egress-sidecar forwards
+// requests to it over loopback (which survives suspend), so there is no
+// dedup registry and no /notify — the sidecar delivers the response to the
+// ingress-broker out-of-band. Nothing here is substrate-aware.
 package agentsrv
 
 import (
-	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
-	"time"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/plugin"
@@ -48,17 +44,12 @@ const (
 
 // Server hosts the ADK runner behind POST /run.
 type Server struct {
-	runner    *runner.Runner
-	tracker   *activityz.Tracker
-	notifyURL string
-	notifier  *http.Client
-	registry  *registry
+	runner  *runner.Runner
+	tracker *activityz.Tracker
 }
 
-// New builds a Server for agent a. notifyURL is the ingress-broker wake
-// endpoint (empty disables notifications). The returned Server also exposes
-// the activity tracker via StatusHandler.
-func New(a agent.Agent, notifyURL string) (*Server, error) {
+// New builds a Server for agent a.
+func New(a agent.Agent) (*Server, error) {
 	tracker, activityPlugin, err := activityz.New("activityz")
 	if err != nil {
 		return nil, fmt.Errorf("activityz.New: %w", err)
@@ -73,20 +64,7 @@ func New(a agent.Agent, notifyURL string) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("runner.New: %w", err)
 	}
-	return &Server{
-		runner:    r,
-		tracker:   tracker,
-		notifyURL: notifyURL,
-		// The notify call is infrastructure plumbing to the ingress-broker,
-		// not agent egress — it must NOT traverse the egress tunnel (that
-		// would be circular), so its transport explicitly ignores HTTP_PROXY.
-		// DisableKeepAlives: /notify is the ingress-broker's only wake path,
-		// and it fires right after a resume. A pooled connection from a
-		// previous turn is dead after the suspend, and Go won't retry a POST
-		// on a broken persistent connection — so dial fresh every time.
-		notifier: &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{Proxy: nil, DisableKeepAlives: true}},
-		registry: newRegistry(),
-	}, nil
+	return &Server{runner: r, tracker: tracker}, nil
 }
 
 // StatusHandler serves the activity endpoint (/statusz) the sidecar polls.
@@ -102,7 +80,10 @@ type runResp struct {
 	Error  string `json:"error,omitempty"`
 }
 
-// HandleRun runs the agent for (sessionId, input), deduplicating retries.
+// HandleRun runs the agent for (sessionId, input) and returns the result.
+// The request arrives over the sidecar's loopback connection, which survives
+// suspend/resume, so r.Context() stays live across a suspend and the run
+// simply continues — no dedup or notify needed.
 func (s *Server) HandleRun(w http.ResponseWriter, r *http.Request) {
 	var req runReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -114,34 +95,11 @@ func (s *Server) HandleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	key := dedupKey(req.SessionID, req.Input)
-	e, isNew := s.registry.getOrCreate(key)
-
-	if !isNew {
-		log.Printf("run: session=%s key=%s joining in-flight/cached", req.SessionID, key)
-		result, errMsg, ok := e.wait(r.Context())
-		if !ok {
-			writeJSON(w, http.StatusServiceUnavailable, runResp{Error: "client cancelled while waiting for cached result"})
-			return
-		}
-		if errMsg != "" {
-			writeJSON(w, http.StatusInternalServerError, runResp{Error: errMsg})
-			return
-		}
-		writeJSON(w, http.StatusOK, runResp{Result: result})
-		return
-	}
-
-	log.Printf("run: session=%s key=%s input=%q starting", req.SessionID, key, req.Input)
-
-	// Detach from the request context: if the ingress connection drops when
-	// the actor is suspended mid-run, the run still completes on resume,
-	// caches the result, and notifies the broker.
-	runCtx := context.Background()
+	log.Printf("run: session=%s input=%q starting", req.SessionID, req.Input)
 	msg := &genai.Content{Role: "user", Parts: []*genai.Part{{Text: req.Input}}}
 
 	var final, errMsg string
-	for ev, err := range s.runner.Run(runCtx, userID, req.SessionID, msg, agent.RunConfig{}) {
+	for ev, err := range s.runner.Run(r.Context(), userID, req.SessionID, msg, agent.RunConfig{}) {
 		if err != nil {
 			errMsg = err.Error()
 			log.Printf("run: session=%s error=%v", req.SessionID, err)
@@ -157,47 +115,12 @@ func (s *Server) HandleRun(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	e.complete(final, errMsg)
-	s.notifyBroker(req.SessionID, req.Input)
-	log.Printf("run: session=%s key=%s result=%q err=%q", req.SessionID, key, final, errMsg)
-
+	log.Printf("run: session=%s result=%q err=%q", req.SessionID, final, errMsg)
 	if errMsg != "" {
 		writeJSON(w, http.StatusInternalServerError, runResp{Error: errMsg})
 		return
 	}
 	writeJSON(w, http.StatusOK, runResp{Result: final})
-}
-
-// notifyBroker tells the ingress-broker a result is ready, so it can wake a
-// parked client request. This is the ingress-broker's ONLY wake path, so it
-// retries: the call fires right after a resume, when the direct (untunneled)
-// network path may briefly reset a connection. Dropping it would strand the
-// client until its own timeout.
-func (s *Server) notifyBroker(sessionID, input string) {
-	if s.notifyURL == "" {
-		return
-	}
-	body, _ := json.Marshal(runReq{SessionID: sessionID, Input: input})
-	const attempts = 5
-	for i := 1; i <= attempts; i++ {
-		req, err := http.NewRequest(http.MethodPost, s.notifyURL, bytes.NewReader(body))
-		if err != nil {
-			log.Printf("notify: build request: %v", err)
-			return
-		}
-		req.Header.Set("Content-Type", "application/json")
-		resp, err := s.notifier.Do(req)
-		if err == nil {
-			resp.Body.Close()
-			log.Printf("notify %s: status=%d attempt=%d", s.notifyURL, resp.StatusCode, i)
-			return
-		}
-		log.Printf("notify %s: attempt=%d failed: %v", s.notifyURL, i, err)
-		if i < attempts {
-			time.Sleep(time.Duration(i) * 300 * time.Millisecond)
-		}
-	}
-	log.Printf("notify %s: giving up after %d attempts", s.notifyURL, attempts)
 }
 
 func writeJSON(w http.ResponseWriter, status int, body runResp) {

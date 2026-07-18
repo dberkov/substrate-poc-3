@@ -365,12 +365,37 @@ the default client behavior.
 - **Phase 2 — HTTPS + LLM:** CONNECT support in sidecar/broker; MCP server
   over HTTPS; point `HTTPS_PROXY` at the sidecar so Gemini traffic rides the
   same tunnel — suspend during LLM calls with zero SDK changes.
-- **Phase 3 — transparent ingress:** client unawareness. atenet already wakes
-  on request; add parked-request replay (offset-tunnel treatment for the
-  inbound leg, likely a second listener in the same sidecar). Combining
-  ingress+egress visibility also makes the idle-suspend rule exact ("no
-  in-flight inbound AND no egress activity"), allowing a much shorter idle
-  window.
+- **Phase 3 — transparent ingress (reply-to relay):** the client becomes a
+  plain HTTP caller, unaware of suspend/resume. Instead of the poc-1
+  park/notify/dedup dance, the ingress-broker is a **reply-to relay**:
+  - `/run` (client-facing) holds the client connection, forwards the request
+    to the actor **via atenet** (which does the `ResumeActor` wake — the
+    ingress-broker calls **no** ateapi), tagged with `X-Reply-To` (this
+    instance's directly-reachable pod address) and a unique `X-Request-Id`.
+  - The **egress-sidecar owns the actor's `:80`** (atenet-routed), acks atenet
+    `202`, forwards the request to the agent over loopback (survives suspend),
+    and delivers the response **outbound** to `X-Reply-To` (the survivable
+    direction), with retry.
+  - `/reply` (sidecar-facing) matches `X-Request-Id` back to the held client
+    connection and writes the response.
+
+  Why not the offset byte-tunnel here: for request/response, each leg is a
+  whole HTTP message that can be retried atomically, so no offset replay is
+  needed — plain HTTP + an addressed callback suffices. The byte-tunnel is
+  reserved for a future **bidirectional-streaming** extension, where ongoing
+  client→agent data must also survive suspend (the inbound leg then moves onto
+  a persistent sidecar-dialed tunnel to the same `X-Reply-To` instance).
+
+  **Scale-out:** because the response is addressed to a specific instance
+  (`X-Reply-To` = pod IP), N ingress-broker replicas behind a plain L4 LB need
+  **no rendezvous / consistent-hashing** — a client hits any instance and the
+  reply returns to that exact instance over the actor's survivable outbound
+  path. (The alternative — a persistent sidecar↔ingress-broker tunnel — would
+  have required the client request and the sidecar tunnel to land on the same
+  instance, forcing an L7 consistent-hash LB.)
+
+  Not yet done: combining ingress+egress visibility to make idle-suspend exact
+  ("no in-flight inbound AND no egress activity") — still deferred.
 - **Phase 4 (optional) — Envoy composition:** stock Envoy around the Go broker
   for egress policy (CONNECT target allow-listing), mTLS, observability, xDS-
   driven routing — mirroring atenet's stock-Envoy + Go-companion pattern.

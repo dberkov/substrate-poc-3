@@ -48,6 +48,9 @@ var (
 	proxyListen = pflag.String("proxy-listen", envOr("PROXY_LISTEN", ":15001"), "address the agent points HTTP(S)_PROXY at")
 	brokerAddr  = pflag.String("broker-addr", envOr("BROKER_ADDR", ""), "egress-broker tunnel address (host:port)")
 
+	ingressListen = pflag.String("ingress-listen", envOr("INGRESS_LISTEN", ""), "address to accept atenet-routed client requests on (phase 3; empty disables)")
+	agentAddr     = pflag.String("agent-addr", envOr("AGENT_ADDR", "127.0.0.1:8080"), "the agent's loopback address the ingress interceptor forwards to")
+
 	atespace    = pflag.String("atespace", envOr("ATE_ATESPACE", ""), "actor's atespace (constant per template; safe as env)")
 	actorName   = pflag.String("actor-name", envOr("ATE_ACTOR_NAME", ""), "actor name; overrides --actor-id-file when set")
 	actorIDFile = pflag.String("actor-id-file", envOr("ATE_ACTOR_ID_FILE", "/run/ate/actor-id"), "file substrate bind-mounts with the actor name")
@@ -126,6 +129,23 @@ func main() {
 		log.Info("suspend poller enabled", "blockedAfter", *blockedAfter, "includeModelCalls", *includeModel, "idleAfter", *idleAfter)
 	} else {
 		log.Info("suspend poller disabled")
+	}
+
+	// Phase-3 ingress interceptor: accept atenet-routed client requests on
+	// :80 and bridge them to the agent + reply-to path.
+	if *ingressListen != "" {
+		iln, err := net.Listen("tcp", *ingressListen)
+		if err != nil {
+			log.Error("listen ingress", "addr", *ingressListen, "err", err)
+			os.Exit(1)
+		}
+		ingress := sidecar.NewIngress(*agentAddr, log)
+		go func() {
+			if err := ingress.Serve(ctx, iln); err != nil {
+				log.Error("ingress serve", "err", err)
+			}
+		}()
+		log.Info("ingress interceptor enabled", "listen", *ingressListen, "agent", *agentAddr)
 	}
 
 	ln, err := net.Listen("tcp", *proxyListen)

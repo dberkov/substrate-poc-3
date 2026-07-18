@@ -109,8 +109,11 @@ spec:
 
 ---
 
-# The ingress-broker: parks the client's /run across the actor's suspend
-# (client side stays suspend-aware in phase 1). Ported from poc-1.
+# The ingress-broker (phase 3): client-transparent reply-to relay. /run holds
+# the client connection and forwards the request via atenet (which wakes the
+# actor); the sidecar delivers the response back out-of-band to /reply on this
+# pod's IP. Uses no substrate API. Scales behind a plain LB (reply is
+# addressed to a specific pod IP, so no rendezvous is needed).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -128,9 +131,19 @@ spec:
       - name: ingress-broker
         image: ko://github.com/dberkov/substrate-poc-3/demos/adk-calc/ingress-broker
         command: ["/ko-app/ingress-broker"]
-        ports: [{containerPort: 80}]
+        ports:
+        - {containerPort: 80, name: client}
+        - {containerPort: 9090, name: reply}
         env:
         - {name: ATENET_ADDR, value: "atenet-router.ate-system.svc:80"}
+        - {name: ATE_ATESPACE, value: "${ATE_ATESPACE}"}
+        - {name: REPLY_LISTEN, value: ":9090"}
+        - {name: REPLY_PORT, value: "9090"}
+        # POD_IP is what the sidecar posts replies to (directly reachable).
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
         readinessProbe:
           httpGet: {path: /healthz, port: 80}
 
@@ -179,7 +192,9 @@ spec:
     env:
     - {name: GOOGLE_API_KEY, value: "${GOOGLE_API_KEY}"}
     - {name: CALC_MCP_URL, value: "http://mcp-server.ate-demo-adk-calc.svc/mcp"}
-    - {name: BROKER_NOTIFY_URL, value: "http://ingress-broker.ate-demo-adk-calc.svc/notify"}
+    # Phase 3: the sidecar owns the actor's :80 (atenet-routed) and forwards
+    # here over loopback, so the agent listens on a private port.
+    - {name: LISTEN_ADDR, value: ":8080"}
     # 127.0.0.1, not "localhost": the gVisor actor has no /etc/hosts, so
     # "localhost" would be sent to cluster DNS and NXDOMAIN. The literal IP
     # needs no resolution.
@@ -191,16 +206,23 @@ spec:
     readyz:
       httpGet:
         path: /readyz
-        port: 80
+        port: 8080
   # The egress-sidecar. Reads its actor name from /run/ate/actor-id; atespace
   # is constant per template (baked into env). Owns suspend (polls /statusz);
   # the broker owns resume.
   - name: egress-sidecar
     image: ko://github.com/dberkov/substrate-poc-3/cmd/egress-sidecar
     command: ["/ko-app/egress-sidecar"]
+    # No containerPort here: the ActorTemplate Container schema has no ports
+    # field. The sidecar simply listens on :80 in the actor's shared netns,
+    # which is where atenet routes; the DNAT targets :80 regardless.
     env:
     - {name: PROXY_LISTEN, value: ":15001"}
     - {name: BROKER_ADDR, value: "egress-broker.ate-demo-adk-calc.svc:9000"}
+    # Phase 3: own the actor's atenet-routed :80 and forward client requests
+    # to the agent over loopback, delivering the response out-of-band.
+    - {name: INGRESS_LISTEN, value: ":80"}
+    - {name: AGENT_ADDR, value: "127.0.0.1:8080"}
     - {name: ATE_ATESPACE, value: "${ATE_ATESPACE}"}
     - {name: STATUS_URL, value: "http://127.0.0.1:9902/statusz"}
     # Suspend ~1s into a tool call (blocked on egress the broker holds).
