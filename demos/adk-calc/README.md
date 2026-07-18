@@ -158,12 +158,19 @@ start a new client session afterwards.
 ./hack/install-poc.sh --delete-demo-adk-calc
 ```
 
-## Notes & limitations (phase 1)
+## Notes & limitations (phase 2)
 
-- Only HTTP MCP traffic is tunneled. Gemini (HTTPS) goes direct; suspend only
-  fires on tool-call blocking, never during an LLM call, so the direct Gemini
-  connection is never cut mid-request. Phase 2 tunnels HTTPS via CONNECT and
-  enables model-call suspend.
+- **Both MCP (HTTP) and Gemini (HTTPS) are tunneled** — `HTTP_PROXY` and
+  `HTTPS_PROXY` both point at the sidecar, so the LLM connection rides a
+  CONNECT tunnel and survives suspend/resume like the MCP path (TLS stays
+  end-to-end; the broker only shuttles opaque bytes). The actor can now be
+  suspended *during an LLM call* too (`INCLUDE_MODEL_CALLS=true`), so a single
+  turn may suspend/resume more than once (LLM call, then tool call). Each
+  tool/model call is suspended at most once (the plugin's `*CallsStarted`
+  counters gate it), so resume delivers the response instead of looping.
+- MCP is still plain HTTP — Gemini already exercises the CONNECT/HTTPS path, so
+  making our own MCP server HTTPS would add cert management for no extra proof.
+  It's a trivial swap if desired (point `CALC_MCP_URL` at an `https://` MCP).
 - The client is suspend-aware (creates/deletes the actor, and its request is
   parked by the ingress-broker). Phase 3 makes the client transparent.
 - `DisableStandaloneSSE` keeps the MCP client to one POST per call; re-enabling

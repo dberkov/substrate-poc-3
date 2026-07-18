@@ -49,22 +49,12 @@ func Build(ctx context.Context) (agent.Agent, error) {
 		return nil, fmt.Errorf("CALC_MCP_URL env var is required")
 	}
 
-	// Phase-1 caveat: Gemini traffic is NOT tunneled (no HTTPS_PROXY set), so
-	// it uses the direct masquerade egress path, and that external connection
-	// dies on every actor suspend. The genai SDK pools keep-alive connections;
-	// after a suspend during a tool call, the next LLM call would reuse a dead
-	// pooled connection and fail with "connection reset by peer" (Go does not
-	// auto-retry POSTs on a broken persistent connection). Disabling keep-
-	// alives makes each LLM call dial fresh — the actor is resumed and
-	// networked by the time it runs. Phase 2 removes this by routing Gemini
-	// through the sidecar tunnel, where the connection survives suspend and
-	// pooling is fine again.
-	llmTransport := http.DefaultTransport.(*http.Transport).Clone()
-	llmTransport.DisableKeepAlives = true
-	model, err := gemini.NewModel(ctx, "gemini-flash-latest", &genai.ClientConfig{
-		APIKey:     apiKey,
-		HTTPClient: &http.Client{Transport: llmTransport},
-	})
+	// Phase 2: Gemini is tunneled via HTTPS_PROXY (CONNECT through the
+	// egress-sidecar), so the connection survives suspend/resume like the MCP
+	// path — keep-alive pooling is safe and efficient again (the phase-1
+	// DisableKeepAlives workaround for the direct-masquerade path is gone).
+	// The transport honors HTTPS_PROXY via ProxyFromEnvironment (the default).
+	model, err := gemini.NewModel(ctx, "gemini-flash-latest", &genai.ClientConfig{APIKey: apiKey})
 	if err != nil {
 		return nil, fmt.Errorf("gemini.NewModel: %w", err)
 	}

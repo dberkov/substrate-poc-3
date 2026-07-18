@@ -38,6 +38,11 @@ type Status struct {
 	ToolCallsStarted uint64 `json:"toolCallsStarted"`
 	// ModelCallsInFlight is the number of LLM calls currently running.
 	ModelCallsInFlight int `json:"modelCallsInFlight"`
+	// ModelCallsStarted is a monotonic count of LLM calls ever started —
+	// the model-call analogue of ToolCallsStarted, so a suspend poller can
+	// suspend each LLM call at most once (phase 2, when LLM traffic is
+	// tunneled).
+	ModelCallsStarted uint64 `json:"modelCallsStarted"`
 	// ToolBlockedMillis is the age of the oldest in-flight tool call, or 0 if
 	// none. The suspend poller watches this in phase 1 (only tool calls are
 	// tunneled, so only they are safe to suspend during).

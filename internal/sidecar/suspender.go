@@ -45,13 +45,14 @@ type Suspender struct {
 	idle         time.Duration // suspend if no invocation for this long (0 disables)
 	cooldown     time.Duration // min time between suspend attempts
 
-	// lastToolGen is the ToolCallsStarted value at the last tool-block
-	// suspend. A given tool call is suspended at most once: on resume the same
-	// call is still in flight with the same started-count, so the poller must
-	// not re-suspend before the broker's response has been delivered (that
-	// would loop wake → re-suspend → wake and the result would never arrive).
-	// This is clock-independent — it does not rely on any timing grace.
-	lastToolGen uint64
+	// lastToolGen/lastModelGen are the ToolCallsStarted/ModelCallsStarted
+	// values at the last tool/model-block suspend. A given call is suspended
+	// at most once: on resume the same call is still in flight with the same
+	// started-count, so the poller must not re-suspend before the broker's
+	// response has been delivered (that would loop wake → re-suspend → wake
+	// and the result would never arrive). Clock-independent — no timing grace.
+	lastToolGen  uint64
+	lastModelGen uint64
 }
 
 // SuspenderConfig configures a Suspender.
@@ -116,16 +117,21 @@ func (s *Suspender) Run(ctx context.Context) {
 		if reason == "" {
 			continue
 		}
-		// Suspend each tool call at most once. After a suspend the broker
-		// holds the upstream and wakes the actor when the response arrives;
-		// on resume the SAME tool call is still in flight (same
-		// ToolCallsStarted), and re-suspending now — before the reconnecting
+		// Suspend each tool/model call at most once. After a suspend the
+		// broker holds the upstream and wakes the actor when the response
+		// arrives; on resume the SAME call is still in flight (same
+		// *CallsStarted), and re-suspending now — before the reconnecting
 		// tunnel has replayed the response — would loop forever and the result
 		// would never reach the agent. Gate on the started-count, which is
 		// clock-independent and survives the checkpoint.
-		if reason == reasonToolBlocked {
+		switch reason {
+		case reasonToolBlocked:
 			if st.ToolCallsStarted <= s.lastToolGen {
 				continue // already suspended this tool call; awaiting its response
+			}
+		case reasonModelBlocked:
+			if st.ModelCallsStarted <= s.lastModelGen {
+				continue // already suspended this model call; awaiting its response
 			}
 		}
 		// The sidecar's clock freezes with the actor across a suspend, so the
@@ -134,8 +140,11 @@ func (s *Suspender) Run(ctx context.Context) {
 		if time.Since(lastSuspend) < s.cooldown {
 			continue
 		}
-		if reason == reasonToolBlocked {
+		switch reason {
+		case reasonToolBlocked:
 			s.lastToolGen = st.ToolCallsStarted
+		case reasonModelBlocked:
+			s.lastModelGen = st.ModelCallsStarted
 		}
 		lastSuspend = time.Now()
 		s.suspend(reason, st)

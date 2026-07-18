@@ -37,14 +37,15 @@ import (
 
 // Tracker holds the live activity counters. Safe for concurrent use.
 type Tracker struct {
-	mu             sync.Mutex
-	invocations    int
-	toolCalls      int
-	toolCallsTotal uint64 // monotonic count of tool calls ever started
-	modelCalls     int
-	toolBusySince  time.Time // when tool in-flight last went 0 -> >0
-	modelBusy      time.Time // when model in-flight last went 0 -> >0
-	lastActivity   time.Time
+	mu              sync.Mutex
+	invocations     int
+	toolCalls       int
+	toolCallsTotal  uint64 // monotonic count of tool calls ever started
+	modelCalls      int
+	modelCallsTotal uint64    // monotonic count of model calls ever started
+	toolBusySince   time.Time // when tool in-flight last went 0 -> >0
+	modelBusy       time.Time // when model in-flight last went 0 -> >0
+	lastActivity    time.Time
 }
 
 // New returns a Tracker and the ADK Plugin that feeds it. Register the
@@ -115,6 +116,7 @@ func (t *Tracker) beforeModel(agent.CallbackContext, *model.LLMRequest) (*model.
 		t.modelBusy = time.Now()
 	}
 	t.modelCalls++
+	t.modelCallsTotal++
 	t.lastActivity = time.Now()
 	t.mu.Unlock()
 	return nil, nil
@@ -142,6 +144,7 @@ func (t *Tracker) Snapshot() activitystatus.Status {
 		ToolCallsInFlight:   t.toolCalls,
 		ToolCallsStarted:    t.toolCallsTotal,
 		ModelCallsInFlight:  t.modelCalls,
+		ModelCallsStarted:   t.modelCallsTotal,
 	}
 	if !t.toolBusySince.IsZero() {
 		s.ToolBlockedMillis = time.Since(t.toolBusySince).Milliseconds()

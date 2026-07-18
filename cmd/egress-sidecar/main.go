@@ -58,6 +58,7 @@ var (
 	suspendOff  = pflag.Bool("no-suspend", envBool("NO_SUSPEND", false), "disable the suspend poller (proxy/tunnel only)")
 
 	blockedAfter = pflag.Duration("blocked-after", envDur("BLOCKED_AFTER", time.Second), "suspend after being blocked on a tool/model call this long")
+	includeModel = pflag.Bool("include-model-calls", envBool("INCLUDE_MODEL_CALLS", false), "also suspend during LLM/model calls (safe once LLM traffic is tunneled — phase 2)")
 	idleAfter    = pflag.Duration("idle-after", envDur("IDLE_AFTER", 0), "suspend after no invocation for this long (0 disables)")
 	pingInterval = pflag.Duration("ping-interval", envDur("PING_INTERVAL", time.Second), "tunnel PING interval")
 	pongTimeout  = pflag.Duration("pong-timeout", envDur("PONG_TIMEOUT", 3*time.Second), "reconnect if no PONG within this")
@@ -113,15 +114,16 @@ func main() {
 		}
 		defer lc.Close()
 		susp := sidecar.NewSuspender(sidecar.SuspenderConfig{
-			Lifecycle:    lc,
-			Actor:        identity,
-			StatusURL:    *statusURL,
-			BlockedAfter: *blockedAfter,
-			IdleAfter:    *idleAfter,
-			Logger:       log,
+			Lifecycle:         lc,
+			Actor:             identity,
+			StatusURL:         *statusURL,
+			BlockedAfter:      *blockedAfter,
+			IncludeModelCalls: *includeModel,
+			IdleAfter:         *idleAfter,
+			Logger:            log,
 		})
 		go susp.Run(ctx)
-		log.Info("suspend poller enabled", "blockedAfter", *blockedAfter, "idleAfter", *idleAfter)
+		log.Info("suspend poller enabled", "blockedAfter", *blockedAfter, "includeModelCalls", *includeModel, "idleAfter", *idleAfter)
 	} else {
 		log.Info("suspend poller disabled")
 	}

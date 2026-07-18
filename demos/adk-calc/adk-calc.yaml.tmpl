@@ -169,9 +169,10 @@ metadata:
 spec:
   pauseImage: "registry.k8s.io/pause:3.10.2@sha256:f548e0e8e3dc1896ca956272154dde3314e8cc4fde0a57577ee9fa1c63f5baf4"
   containers:
-  # The vanilla agent. Its ONLY substrate-relevant config is HTTP_PROXY: the
-  # MCP tool calls (http://) flow through the sidecar; Gemini (https://) has
-  # no HTTPS_PROXY set, so it goes direct in phase 1 (tunneled in phase 2).
+  # The vanilla agent. Its ONLY substrate-relevant config is the proxy env:
+  # BOTH MCP tool calls (http://) and Gemini (https:// via CONNECT) flow
+  # through the sidecar tunnel and survive suspend/resume. The agent keeps its
+  # real destination URLs and needs no code awareness.
   - name: agent-server
     image: ko://github.com/dberkov/substrate-poc-3/demos/adk-calc/agent-server
     command: ["/ko-app/agent-server"]
@@ -183,6 +184,8 @@ spec:
     # "localhost" would be sent to cluster DNS and NXDOMAIN. The literal IP
     # needs no resolution.
     - {name: HTTP_PROXY, value: "http://127.0.0.1:15001"}
+    # Phase 2: tunnel HTTPS (Gemini) too, via CONNECT through the sidecar.
+    - {name: HTTPS_PROXY, value: "http://127.0.0.1:15001"}
     - {name: NO_PROXY, value: "localhost,127.0.0.1"}
     - {name: STATUS_LISTEN, value: "127.0.0.1:9902"}
     readyz:
@@ -203,6 +206,10 @@ spec:
     # Suspend ~1s into a tool call (blocked on egress the broker holds).
     - {name: ATEAPI_ADDR, value: "api.ate-system.svc:443"}
     - {name: BLOCKED_AFTER, value: "1s"}
+    # Phase 2: also suspend during LLM calls (now that Gemini is tunneled and
+    # survives suspend). Each call is suspended at most once via the plugin's
+    # ModelCallsStarted counter, so it can't loop on resume.
+    - {name: INCLUDE_MODEL_CALLS, value: "true"}
     # Idle-suspend is intentionally OFF in phase 1 (IDLE_AFTER defaults to 0):
     # the sidecar can't see the ingress side, so a "no ADK invocation for N"
     # timer races the /notify→retry result delivery and can suspend before the
