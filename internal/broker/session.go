@@ -109,7 +109,10 @@ func (s *session) detach(tc *tunnelConn) {
 		return
 	}
 	s.tconn = nil
-	wake := s.downBuf.Len() > 0 || (s.downClosed && s.requestOutstanding)
+	// Only wake for a PENDING session (a request awaiting its response) that
+	// has undelivered data or a close. A quiescent session's buffered
+	// keep-alive housekeeping must not resurrect a suspended actor.
+	wake := s.requestOutstanding && (s.downBuf.Len() > 0 || s.downClosed)
 	s.log.Debug("detached from tunnel; upstream retained", "wake", wake)
 	s.mu.Unlock()
 	s.cond.Broadcast()
@@ -221,11 +224,17 @@ func (s *session) produceDownstream(p []byte) error {
 				s.tconn = nil
 			}
 		}
-		if s.tconn == nil {
-			// Detached: response data arrived for a suspended actor. Wake it
-			// so it re-attaches and drains downBuf. (detach() also wakes as a
-			// backstop for the race where the tunnel dies during this write.)
-			s.b.wake(s.actorID, "downstream data while detached")
+		if s.tconn == nil && s.requestOutstanding {
+			// Detached AND a request is awaiting its response: this is that
+			// response arriving while the actor is suspended → wake it to
+			// re-attach and drain downBuf. If the session is quiescent
+			// (requestOutstanding == false — an idle pooled connection), we do
+			// NOT wake: this is just the upstream's keep-alive housekeeping
+			// (HTTP/2 GOAWAY/PING, TLS close_notify, idle-reap), which must
+			// not resurrect a suspended actor. It's buffered and delivered on
+			// the next natural attach. (Waking here caused a suspend/resume
+			// oscillation once the upstreams went idle.)
+			s.b.wake(s.actorID, "downstream data on pending session")
 		}
 		p = p[take:]
 	}

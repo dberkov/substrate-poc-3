@@ -44,6 +44,7 @@ type Suspender struct {
 	includeModel bool          // also suspend on model-call blocking (phase 2)
 	idle         time.Duration // suspend after this long with no in-flight ingress request (0 disables)
 	cooldown     time.Duration // min time between suspend attempts
+	resumeGap    time.Duration // wall-clock gap between ticks above this means we were suspended (resume detected)
 
 	// ingressIdle returns how long there has been no in-flight ingress
 	// request (0 while one is being processed). This is the phase-3 idle
@@ -88,6 +89,10 @@ func NewSuspender(cfg SuspenderConfig) *Suspender {
 	if cfg.Cooldown == 0 {
 		cfg.Cooldown = 2 * time.Second
 	}
+	resumeGap := 2 * time.Second
+	if cfg.PollInterval*3 > resumeGap {
+		resumeGap = cfg.PollInterval * 3
+	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
@@ -102,6 +107,7 @@ func NewSuspender(cfg SuspenderConfig) *Suspender {
 		includeModel: cfg.IncludeModelCalls,
 		idle:         cfg.IdleAfter,
 		cooldown:     cfg.Cooldown,
+		resumeGap:    resumeGap,
 		ingressIdle:  cfg.IngressIdle,
 	}
 }
@@ -111,12 +117,30 @@ func (s *Suspender) Run(ctx context.Context) {
 	t := time.NewTicker(s.poll)
 	defer t.Stop()
 	var lastSuspend time.Time
+	prevTick := time.Now()
+	var idleGraceUntil time.Time
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
 		}
+
+		now := time.Now()
+		// Detect a resume: a wall-clock gap between ticks much larger than the
+		// poll interval means the actor was suspended in between (.Round(0)
+		// strips the monotonic reading so this compares wall clocks, robust to
+		// how the monotonic clock behaves across checkpoint/restore). After a
+		// resume the ingress idle timer is stale, so grant a grace window
+		// before idle-suspend can fire again — long enough for the request
+		// that triggered the resume to register as in-flight. Without this the
+		// poller re-suspends the just-woken actor before its request is
+		// processed, and the request is lost.
+		if now.Round(0).Sub(prevTick.Round(0)) > s.resumeGap {
+			idleGraceUntil = now.Add(s.idle)
+			s.log.Debug("resume detected; holding off idle-suspend", "until", idleGraceUntil)
+		}
+		prevTick = now
 
 		// Block-suspend needs /statusz; idle-suspend needs the ingress signal.
 		// A /statusz error only disables the block path, not idle.
@@ -128,7 +152,8 @@ func (s *Suspender) Run(ctx context.Context) {
 		if err == nil {
 			reason = s.decideBlocked(st)
 		}
-		if reason == "" && s.ingressIdle != nil && s.idle > 0 && s.ingressIdle() >= s.idle {
+		if reason == "" && s.ingressIdle != nil && s.idle > 0 &&
+			now.After(idleGraceUntil) && s.ingressIdle() >= s.idle {
 			reason = reasonIdle
 		}
 		if reason == "" {
