@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package agent builds the calculator ADK agent. Compared with poc-1 this
-// is a VANILLA agent: it has no substrate awareness whatsoever — no actor
+// Package agent builds the calculator ADK agent. It is a VANILLA agent:
+// it has no substrate awareness whatsoever — no actor
 // ID, no ateapi client, no self-suspend, no X-Actor-Id header. It talks to
 // the MCP server at its REAL URL; the only reason its tool calls survive
 // suspend/resume is the HTTP_PROXY env var pointing at the egress-sidecar,

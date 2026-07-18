@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package ingressbroker is the phase-3 client-transparent ingress relay
-// (DESIGN.md phase 3). It makes the client unaware of suspend/resume using a
-// reply-to callback instead of the poc-1 park/notify/dedup dance:
+// Package ingressbroker is the client-transparent ingress relay
+// (DESIGN.md §8). It makes the client unaware of suspend/resume using a
+// reply-to callback rather than an app-specific park/notify/dedup dance:
 //
 //   - /run (client-facing): holds the client's connection, forwards the
 //     request to the actor THROUGH atenet (which wakes it), tagged with

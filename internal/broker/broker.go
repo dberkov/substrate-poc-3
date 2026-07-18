@@ -48,8 +48,8 @@ type Config struct {
 	// interval. Default 4s.
 	TunnelReadTimeout time.Duration
 	// AllowTarget, if non-nil, gates which upstream host:port an OPEN may
-	// dial. Returning false rejects the session. (Phase-4 policy lives
-	// here; nil allows all.)
+	// dial. Returning false rejects the session. (Egress allow-listing
+	// policy lives here; nil allows all.)
 	AllowTarget func(target string) bool
 	Logger      *slog.Logger
 }

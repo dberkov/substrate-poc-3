@@ -14,9 +14,9 @@
 
 // Command client is the local dev driver for the adk-calc demo. It creates
 // an actor (named after a fresh session ID), resumes it, and runs a REPL
-// that sends each line to the agent through the ingress-broker. Unlike
-// poc-1, it does NOT suspend the actor after each result — the egress-
-// sidecar owns suspend now. On exit it suspends and (optionally) deletes the
+// that sends each line to the agent through the ingress-broker. It does NOT
+// suspend the actor after each result — the egress-sidecar owns suspend.
+// On exit it suspends and (optionally) deletes the
 // actor. The client is a dev tool and is deliberately substrate-aware; it is
 // not part of the "unaware egress" claim.
 package main
